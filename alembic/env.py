@@ -62,7 +62,9 @@ sys.path.append(str(BASE_DIR))
 
 # Import Base and all models so Alembic can detect them
 from app.database import Base
-from app.models.item import Item
+from app.models.user import User  # noqa
+from app.models.task import Task  # noqa
+from app.models.session import Session  # noqa
 
 target_metadata = Base.metadata
 
