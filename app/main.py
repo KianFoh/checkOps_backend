@@ -1,5 +1,13 @@
 
+from pathlib import Path
+import sys
+
 from fastapi import FastAPI, Depends
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.routers import auth
 from app.routers import example
 from app.database import SessionLocal
 
@@ -15,6 +23,7 @@ def get_db():
         db.close()
 
 app.include_router(example.router)
+app.include_router(auth.router)
 
 @app.get("/")
 def read_root():
