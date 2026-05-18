@@ -1,0 +1,13 @@
+# Alembic Migration Commands
+
+# Create a new migration (autogenerate)
+alembic revision --autogenerate -m "your message"
+
+# Apply migrations (upgrade to latest)
+alembic upgrade head
+
+# Rollback last migration (downgrade one step)
+alembic downgrade -1
+
+# Rollback to a specific revision
+alembic downgrade <revision_id>
