@@ -9,6 +9,7 @@ if __package__ in (None, ""):
 
 from app.routers import auth
 from app.routers import example
+from app.routers import user
 from app.database import SessionLocal
 
 
@@ -24,6 +25,7 @@ def get_db():
 
 app.include_router(example.router)
 app.include_router(auth.router)
+app.include_router(user.router)
 
 @app.get("/")
 def read_root():

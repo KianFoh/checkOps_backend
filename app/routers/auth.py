@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session as DBSession
 
 from app.database import SessionLocal
+from app.helpers.auth import build_activation_link
+from app.helpers.auth import build_password_reset_link
 from app.helpers.auth import create_email_verification_challenge
 from app.helpers.auth import create_password_reset_challenge
 from app.helpers.auth import create_token
@@ -42,6 +45,46 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+@router.get("/email/activate", response_class=HTMLResponse, include_in_schema=False)
+def open_activation_link(
+    email: str,
+    otp: str,
+    token: str,
+):
+    deep_link = build_activation_link(email=email, otp=otp, token=token)
+    return HTMLResponse(
+        content=(
+            "<!DOCTYPE html>"
+            "<html><head><meta charset='utf-8'><title>Open App</title>"
+            f"<meta http-equiv='refresh' content='0;url={deep_link}'>"
+            "</head><body>"
+            "<p>Opening Smart Checklist app...</p>"
+            f"<p>If nothing happens, <a href='{deep_link}'>tap here</a>.</p>"
+            "</body></html>"
+        )
+    )
+
+
+@router.get("/password/open-reset", response_class=HTMLResponse, include_in_schema=False)
+def open_password_reset_link(
+    email: str,
+    otp: str,
+    token: str,
+):
+    deep_link = build_password_reset_link(email=email, otp=otp, token=token)
+    return HTMLResponse(
+        content=(
+            "<!DOCTYPE html>"
+            "<html><head><meta charset='utf-8'><title>Open App</title>"
+            f"<meta http-equiv='refresh' content='0;url={deep_link}'>"
+            "</head><body>"
+            "<p>Opening Smart Checklist app...</p>"
+            f"<p>If nothing happens, <a href='{deep_link}'>tap here</a>.</p>"
+            "</body></html>"
+        )
+    )
 
 
 @router.post("/login", response_model=LoginResponse)

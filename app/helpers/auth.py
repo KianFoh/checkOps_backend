@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 import hashlib
 import hmac
 import secrets
+import smtplib
+from email.message import EmailMessage
 from urllib.parse import urlencode
 
 from fastapi import HTTPException, status
@@ -17,12 +19,35 @@ from app.models.user import User
 
 load_dotenv()
 
+
+def clean_env_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    cleaned = value.strip().strip("\"").strip("'")
+    return cleaned or None
+
+
+def clean_smtp_password(value: str | None) -> str | None:
+    cleaned = clean_env_value(value)
+    if cleaned is None:
+        return None
+
+    # Gmail app passwords are often copied with spaces for readability.
+    return cleaned.replace(" ", "")
+
 OTP_TTL_MINUTES = 10
 VERIFICATION_TOKEN_TTL_MINUTES = 10
 RESET_OTP_TTL_MINUTES = 10
 RESET_TOKEN_TTL_MINUTES = 10
 PBKDF2_ITERATIONS = 100_000
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@example.com")
+EMAIL_FROM = clean_env_value(os.getenv("EMAIL_FROM")) or "noreply@example.com"
+SMTP_HOST = clean_env_value(os.getenv("SMTP_HOST"))
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = clean_env_value(os.getenv("SMTP_USERNAME"))
+SMTP_PASSWORD = clean_smtp_password(os.getenv("SMTP_PASSWORD"))
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+API_HOSTNAME = (clean_env_value(os.getenv("API_HOSTNAME")) or "http://127.0.0.1:8000").rstrip("/")
 APP_DEEP_LINK_BASE = os.getenv(
     "ACTIVATION_DEEP_LINK_BASE",
     "smartchecklist://activate-account",
@@ -137,24 +162,95 @@ def build_password_reset_link(email: str, otp: str, token: str) -> str:
     return f"{PASSWORD_RESET_DEEP_LINK_BASE}?{urlencode({'email': email, 'otp': otp, 'token': token})}"
 
 
-def send_verification_email_placeholder(email: str, otp: str, token: str) -> None:
-    activation_link = build_activation_link(email=email, otp=otp, token=token)
-    print("[EMAIL PLACEHOLDER] Activation email")
-    print(f"From: {EMAIL_FROM}")
-    print(f"To: {email}")
-    print(f"OTP: {otp}")
-    print(f"Token: {token}")
-    print(f"Link: {activation_link}")
+def build_activation_bridge_link(email: str, otp: str, token: str) -> str:
+    return f"{API_HOSTNAME}/auth/email/activate?{urlencode({'email': email, 'otp': otp, 'token': token})}"
 
 
-def send_password_reset_email_placeholder(email: str, otp: str, token: str) -> None:
-    reset_link = build_password_reset_link(email=email, otp=otp, token=token)
-    print("[EMAIL PLACEHOLDER] Password reset email")
-    print(f"From: {EMAIL_FROM}")
-    print(f"To: {email}")
-    print(f"OTP: {otp}")
-    print(f"Token: {token}")
-    print(f"Link: {reset_link}")
+def build_password_reset_bridge_link(email: str, otp: str, token: str) -> str:
+    return f"{API_HOSTNAME}/auth/password/open-reset?{urlencode({'email': email, 'otp': otp, 'token': token})}"
+
+
+def can_send_email() -> bool:
+    return all([SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM])
+
+
+def send_email(subject: str, recipient: str, body: str, html_body: str | None = None) -> None:
+    if not can_send_email():
+        print("[EMAIL PLACEHOLDER] SMTP config incomplete")
+        print(f"From: {EMAIL_FROM}")
+        print(f"To: {recipient}")
+        print(f"Subject: {subject}")
+        print(body)
+        return
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = EMAIL_FROM
+    message["To"] = recipient
+    message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+        smtp.ehlo()
+        if SMTP_USE_TLS:
+            smtp.starttls()
+            smtp.ehlo()
+        try:
+            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.send_message(message)
+        except smtplib.SMTPAuthenticationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="SMTP authentication failed. Check SMTP_USERNAME and SMTP_PASSWORD in .env.",
+            ) from exc
+        except smtplib.SMTPException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to send email via SMTP.",
+            ) from exc
+
+
+def send_verification_email(email: str, otp: str, token: str) -> None:
+    activation_link = build_activation_bridge_link(email=email, otp=otp, token=token)
+    body = (
+        "Use the OTP below to activate your Smart Checklist account.\n\n"
+        f"OTP: {otp}\n\n"
+        "Please open this email on your mobile device. "
+        "The activation link only works from the Smart Checklist mobile app.\n\n"
+        f"Activate account: {activation_link}\n\n"
+        "This activation request expires in 10 minutes."
+    )
+    html_body = (
+        "<p>Use the OTP below to activate your Smart Checklist account.</p>"
+        f"<p><strong>OTP: {otp}</strong></p>"
+        "<p>Please open this email on your mobile device. "
+        "The activation link only works from the Smart Checklist mobile app.</p>"
+        f'<p><a href="{activation_link}">Activate account</a></p>'
+        "<p>This activation request expires in 10 minutes.</p>"
+    )
+    send_email("Activate your Smart Checklist account", email, body, html_body)
+
+
+def send_password_reset_email(email: str, otp: str, token: str) -> None:
+    reset_link = build_password_reset_bridge_link(email=email, otp=otp, token=token)
+    body = (
+        "Use the OTP below to reset your Smart Checklist password.\n\n"
+        f"OTP: {otp}\n\n"
+        "Please open this email on your mobile device. "
+        "The reset link only works from the Smart Checklist mobile app.\n\n"
+        f"Reset password: {reset_link}\n\n"
+        "This password reset request expires in 10 minutes."
+    )
+    html_body = (
+        "<p>Use the OTP below to reset your Smart Checklist password.</p>"
+        f"<p><strong>OTP: {otp}</strong></p>"
+        "<p>Please open this email on your mobile device. "
+        "The reset link only works from the Smart Checklist mobile app.</p>"
+        f'<p><a href="{reset_link}">Reset password</a></p>'
+        "<p>This password reset request expires in 10 minutes.</p>"
+    )
+    send_email("Reset your Smart Checklist password", email, body, html_body)
 
 
 def create_email_verification_challenge(
@@ -190,7 +286,7 @@ def create_email_verification_challenge(
     )
     db.commit()
 
-    send_verification_email_placeholder(email=user.email, otp=otp, token=token)
+    send_verification_email(email=user.email, otp=otp, token=token)
 
 
 def create_password_reset_challenge(
@@ -226,7 +322,7 @@ def create_password_reset_challenge(
     )
     db.commit()
 
-    send_password_reset_email_placeholder(email=user.email, otp=otp, token=token)
+    send_password_reset_email(email=user.email, otp=otp, token=token)
 
 
 def validate_activation_artifacts(

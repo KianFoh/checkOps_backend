@@ -29,6 +29,14 @@ class EmailRequest(BaseModel):
     email: str
 
 
+class CreateUserRequest(BaseModel):
+    email: str
+    name: str
+    employee_id: str
+    role: str
+    profile_pic: str | None = None
+
+
 class ValidateLinkRequest(BaseModel):
     email: str
     token: str
@@ -51,6 +59,11 @@ class ResetPasswordRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class CreateUserResponse(BaseModel):
+    message: str
+    user: UserSummary
 
 
 class LinkValidationResponse(BaseModel):
