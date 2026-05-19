@@ -8,12 +8,18 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
 class UserSummary(BaseModel):
     id: int
     email: str
     name: str
     role: str
+    active: bool
     is_email_verified: bool
+    qc_id: int | None = None
 
 
 class LoginResponse(BaseModel):
@@ -35,6 +41,7 @@ class CreateUserRequest(BaseModel):
     employee_id: str
     role: str
     profile_pic: str | None = None
+    qc_id: int | None = None
 
 
 class ValidateLinkRequest(BaseModel):
@@ -64,6 +71,33 @@ class MessageResponse(BaseModel):
 class CreateUserResponse(BaseModel):
     message: str
     user: UserSummary
+
+
+class UpdateUserRequest(BaseModel):
+    email: str | None = None
+    name: str | None = None
+    employee_id: str | None = None
+    role: str | None = None
+    profile_pic: str | None = None
+    password: str | None = Field(default=None, min_length=8)
+    qc_id: int | None = None
+    active: bool | None = None
+    is_email_verified: bool | None = None
+
+
+class UpdateUserResponse(BaseModel):
+    message: str
+    user: UserSummary
+
+
+class GetUserResponse(BaseModel):
+    message: str
+    user: UserSummary
+
+
+class ListUsersResponse(BaseModel):
+    message: str
+    users: list[UserSummary]
 
 
 class LinkValidationResponse(BaseModel):

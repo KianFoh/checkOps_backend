@@ -26,6 +26,7 @@ from app.schemas.auth import LinkValidationResponse
 from app.schemas.auth import LoginRequest
 from app.schemas.auth import LoginResponse
 from app.schemas.auth import MessageResponse
+from app.schemas.auth import RefreshTokenRequest
 from app.schemas.auth import ResetPasswordRequest
 from app.schemas.auth import SetPasswordRequest
 from app.schemas.auth import UserSummary
@@ -45,6 +46,18 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def to_user_summary(user: User) -> UserSummary:
+    return UserSummary(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        role=user.role.value,
+        active=user.active,
+        is_email_verified=user.is_email_verified,
+        qc_id=user.qc_id,
+    )
 
 
 @router.get("/email/activate", response_class=HTMLResponse, include_in_schema=False)
@@ -100,6 +113,12 @@ def login(
             detail="Invalid email or password.",
         )
 
+    if not user.active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is inactive.",
+        )
+
     if not user.is_email_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -113,6 +132,7 @@ def login(
     db_session = Session(
         user_id=user.id,
         access_token=create_token(),
+        access_token_expires_at=access_expires_at,
         refresh_token=create_token(),
         expires_at=refresh_expires_at,
         ip_address=request.client.host if request.client else None,
@@ -127,13 +147,62 @@ def login(
         token_type="bearer",
         access_token_expires_at=access_expires_at,
         refresh_token_expires_at=refresh_expires_at,
-        user=UserSummary(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            role=user.role.value,
-            is_email_verified=user.is_email_verified,
-        ),
+        user=to_user_summary(user),
+    )
+
+
+@router.post("/refresh", response_model=LoginResponse)
+def refresh_access_token(
+    payload: RefreshTokenRequest,
+    request: Request,
+    db: DBSession = Depends(get_db),
+):
+    db_session = db.query(Session).filter(Session.refresh_token == payload.refresh_token).first()
+    if db_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token.",
+        )
+
+    if db_session.expires_at < datetime.utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has expired.",
+        )
+
+    user = db.query(User).filter(User.id == db_session.user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User for this refresh token no longer exists.",
+        )
+
+    if not user.active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is inactive.",
+        )
+
+    if not user.is_email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email is not verified.",
+        )
+
+    access_expires_at = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
+    db_session.access_token = create_token()
+    db_session.access_token_expires_at = access_expires_at
+    db_session.ip_address = request.client.host if request.client else db_session.ip_address
+    db.commit()
+    db.refresh(db_session)
+
+    return LoginResponse(
+        access_token=db_session.access_token,
+        refresh_token=db_session.refresh_token,
+        token_type="bearer",
+        access_token_expires_at=db_session.access_token_expires_at,
+        refresh_token_expires_at=db_session.expires_at,
+        user=to_user_summary(user),
     )
 
 

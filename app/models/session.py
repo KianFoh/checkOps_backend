@@ -9,6 +9,7 @@ class Session(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     user = relationship("User")
     access_token = Column(String, nullable=False, unique=True)
+    access_token_expires_at = Column(DateTime, nullable=False)
     refresh_token = Column(String, nullable=False, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=False)
