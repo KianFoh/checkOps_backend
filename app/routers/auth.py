@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session as DBSession
 
@@ -35,6 +37,7 @@ from app.models.session import Session
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+bearer_scheme = HTTPBearer(auto_error=False)
 
 ACCESS_TOKEN_TTL_MINUTES = 15
 REFRESH_TOKEN_TTL_DAYS = 7
@@ -48,12 +51,38 @@ def get_db():
         db.close()
 
 
+def get_current_session(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: DBSession = Depends(get_db),
+) -> Session:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided.",
+        )
+
+    db_session = (
+        db.query(Session)
+        .filter(Session.access_token == credentials.credentials)
+        .first()
+    )
+    if db_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid access token.",
+        )
+
+    return db_session
+
+
 def to_user_summary(user: User) -> UserSummary:
     return UserSummary(
         id=user.id,
         email=user.email,
         name=user.name,
+        employee_id=user.employee_id,
         role=user.role.value,
+        profile_pic=user.profile_pic,
         active=user.active,
         is_email_verified=user.is_email_verified,
         qc_id=user.qc_id,
@@ -189,9 +218,13 @@ def refresh_access_token(
             detail="Email is not verified.",
         )
 
-    access_expires_at = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
+    now = datetime.utcnow()
+    access_expires_at = now + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
+    refresh_expires_at = now + timedelta(days=REFRESH_TOKEN_TTL_DAYS)
     db_session.access_token = create_token()
     db_session.access_token_expires_at = access_expires_at
+    db_session.refresh_token = create_token()
+    db_session.expires_at = refresh_expires_at
     db_session.ip_address = request.client.host if request.client else db_session.ip_address
     db.commit()
     db.refresh(db_session)
@@ -204,6 +237,17 @@ def refresh_access_token(
         refresh_token_expires_at=db_session.expires_at,
         user=to_user_summary(user),
     )
+
+
+@router.post("/logout", response_model=MessageResponse)
+def logout(
+    current_session: Session = Depends(get_current_session),
+    db: DBSession = Depends(get_db),
+):
+    db.delete(current_session)
+    db.commit()
+
+    return MessageResponse(message="Logged out successfully.")
 
 
 @router.post("/email/resend-activation", response_model=MessageResponse)

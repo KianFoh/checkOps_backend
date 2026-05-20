@@ -34,7 +34,9 @@ def to_user_summary(user: User) -> UserSummary:
         id=user.id,
         email=user.email,
         name=user.name,
+        employee_id=user.employee_id,
         role=user.role.value,
+        profile_pic=user.profile_pic,
         active=user.active,
         is_email_verified=user.is_email_verified,
         qc_id=user.qc_id,
@@ -208,14 +210,14 @@ def update_user(
             detail="You can only update your own profile.",
         )
 
-    allowed_self_fields = {"name", "password", "profile_pic"}
+    allowed_self_fields = {"profile_pic"}
     if not is_admin:
         disallowed_fields = sorted(set(update_data) - allowed_self_fields)
         if disallowed_fields:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    "You can only update your own name, password, and profile picture. "
+                    "You can only update your own profile picture. "
                     f"Disallowed fields: {', '.join(disallowed_fields)}."
                 ),
             )

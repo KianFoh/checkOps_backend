@@ -16,7 +16,9 @@ class UserSummary(BaseModel):
     id: int
     email: str
     name: str
+    employee_id: str | None = None
     role: str
+    profile_pic: str | None = None
     active: bool
     is_email_verified: bool
     qc_id: int | None = None
