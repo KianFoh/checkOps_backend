@@ -65,13 +65,38 @@ def resolve_qc_assignment(qc_id: int | None, db: DBSession) -> User | None:
 
 @router.get("", response_model=ListUsersResponse)
 def get_users(
+    search: str | None = Query(default=None),
     role: str | None = Query(default=None),
+    roles: list[str] | None = Query(default=None),
+    active: bool | None = Query(default=None),
     current_user: User = Depends(require_roles(UserRole.Admin)),
     db: DBSession = Depends(get_db),
 ):
     query = db.query(User)
 
-    if role is not None:
+    if search is not None:
+        cleaned_search = search.strip()
+        if cleaned_search:
+            search_pattern = f"%{cleaned_search}%"
+            query = query.filter(User.name.ilike(search_pattern))
+
+    role_filters = roles or ([role] if role is not None else [])
+    if role_filters:
+        role_enums = []
+        for role_value in role_filters:
+            if not role_value:
+                continue
+            try:
+                role_enums.append(UserRole(role_value))
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid role filter.",
+                )
+        if role_enums:
+            query = query.filter(User.role.in_(role_enums))
+
+    elif role is not None:
         try:
             role_enum = UserRole(role)
         except ValueError:
@@ -80,6 +105,9 @@ def get_users(
                 detail="Invalid role filter.",
             )
         query = query.filter(User.role == role_enum)
+
+    if active is not None:
+        query = query.filter(User.active == active)
 
     users = query.order_by(User.id.asc()).all()
 
