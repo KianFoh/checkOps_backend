@@ -9,6 +9,8 @@ if __package__ in (None, ""):
 
 from app.routers import auth
 from app.routers import example
+from app.routers import notification
+from app.routers import realtime
 from app.routers import task
 from app.routers import user
 from app.database import SessionLocal
@@ -28,6 +30,8 @@ app.include_router(example.router)
 app.include_router(auth.router)
 app.include_router(user.router)
 app.include_router(task.router)
+app.include_router(notification.router)
+app.include_router(realtime.router)
 
 @app.get("/")
 def read_root():

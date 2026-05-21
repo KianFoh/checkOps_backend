@@ -66,6 +66,7 @@ from app.models.email_verification_otp import EmailVerificationOTP  # noqa
 from app.models.email_verification_token import EmailVerificationToken  # noqa
 from app.models.password_reset_otp import PasswordResetOTP  # noqa
 from app.models.password_reset_token import PasswordResetToken  # noqa
+from app.models.notification import Notification  # noqa
 from app.models.user import User  # noqa
 from app.models.task import Task  # noqa
 from app.models.session import Session  # noqa

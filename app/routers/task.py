@@ -8,6 +8,13 @@ from sqlalchemy.orm import Session as DBSession
 from app.database import SessionLocal
 from app.helpers.security import get_current_user
 from app.helpers.security import require_roles
+from app.helpers.notifications import notify_task_entry_assigned
+from app.helpers.notifications import notify_task_entry_expired
+from app.helpers.notifications import notify_task_entry_failed
+from app.helpers.notifications import notify_task_entry_reassigned
+from app.helpers.notifications import notify_task_entry_reviewed
+from app.helpers.notifications import notify_task_entry_schedule_updated
+from app.helpers.notifications import notify_task_entry_submitted
 from app.models.task import IntervalUnit
 from app.models.task import RecurrenceType
 from app.models.task import Task
@@ -235,20 +242,26 @@ def expire_entry_if_overdue(entry: TaskEntry, now: datetime | None = None) -> bo
 
 def expire_overdue_entries(db: DBSession) -> None:
     now = datetime.now()
-    updated = (
+    entries = (
         db.query(TaskEntry)
         .filter(
             TaskEntry.status.in_([TaskStatus.Pending, TaskStatus.Completed]),
             TaskEntry.due_at < now,
         )
-        .update({TaskEntry.status: TaskStatus.Expired}, synchronize_session=False)
+        .all()
     )
-    if updated:
+
+    for entry in entries:
+        entry.status = TaskStatus.Expired
+        notify_task_entry_expired(db, entry)
+
+    if entries:
         db.commit()
 
 
 def expire_entry_for_request(entry: TaskEntry, db: DBSession) -> None:
     if expire_entry_if_overdue(entry):
+        notify_task_entry_expired(db, entry)
         db.commit()
         db.refresh(entry)
 
@@ -550,7 +563,10 @@ def create_task(
     db.add(task)
     db.flush()
 
-    db.add(make_entry(task, start_at=task.recurrence_start_at))
+    entry = make_entry(task, start_at=task.recurrence_start_at)
+    db.add(entry)
+    db.flush()
+    notify_task_entry_assigned(db, entry)
     db.commit()
     db.refresh(task)
 
@@ -720,6 +736,8 @@ def create_task_entry(
     )
 
     db.add(entry)
+    db.flush()
+    notify_task_entry_assigned(db, entry)
     db.commit()
     db.refresh(entry)
     expire_entry_for_request(entry, db)
@@ -771,6 +789,7 @@ def generate_task_entries(
             entry = make_entry(task, start_at=next_at)
             db.add(entry)
             db.flush()
+            notify_task_entry_assigned(db, entry)
             entries.append(entry)
             existing_starts.add(next_at)
         next_at = next_start_at(task, next_at)
@@ -843,6 +862,8 @@ def update_task_entry(
         )
 
     next_status = validate_task_entry_update(entry, update_data, current_user)
+    old_user_id = entry.user_id
+    schedule_changed = bool({"start_at", "due_at"} & update_data.keys())
 
     if "user_id" in update_data:
         get_user(update_data["user_id"], db)
@@ -866,11 +887,21 @@ def update_task_entry(
             if entry.submitted_at is None:
                 entry.submitted_at = datetime.now()
             entry.submitted_by_user_id = current_user.id
+            if entry.status == TaskStatus.Completed:
+                notify_task_entry_submitted(db, entry)
+            else:
+                notify_task_entry_failed(db, entry)
 
         if entry.status in (TaskStatus.Approved, TaskStatus.Rejected):
             if entry.reviewed_at is None:
                 entry.reviewed_at = datetime.now()
             entry.reviewed_by_user_id = current_user.id
+            notify_task_entry_reviewed(db, entry)
+
+    if "user_id" in update_data and entry.user_id != old_user_id:
+        notify_task_entry_reassigned(db, entry, old_user_id)
+    elif schedule_changed:
+        notify_task_entry_schedule_updated(db, entry)
 
     db.commit()
     db.refresh(entry)

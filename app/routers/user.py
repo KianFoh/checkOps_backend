@@ -5,6 +5,7 @@ from app.database import SessionLocal
 from app.helpers.auth import create_email_verification_challenge
 from app.helpers.auth import create_token
 from app.helpers.auth import hash_password
+from app.helpers.realtime import publish_user_event
 from app.helpers.security import get_current_user
 from app.helpers.security import require_roles
 from app.models.user import User
@@ -61,6 +62,27 @@ def resolve_qc_assignment(qc_id: int | None, db: DBSession) -> User | None:
         )
 
     return qc_user
+
+
+def get_active_admin_user_ids(db: DBSession) -> list[int]:
+    return [
+        user.id
+        for user in db.query(User.id)
+        .filter(User.role == UserRole.Admin, User.active == True)
+        .all()
+    ]
+
+
+def publish_user_change(
+    db: DBSession,
+    event_name: str,
+    target_user_id: int,
+) -> None:
+    publish_user_event(
+        get_active_admin_user_ids(db) + [target_user_id],
+        event_name,
+        target_user_id,
+    )
 
 
 @router.get("", response_model=ListUsersResponse)
@@ -201,6 +223,7 @@ def create_user(
     db.refresh(user)
 
     create_email_verification_challenge(user=user, db=db)
+    publish_user_change(db, "user.created", user.id)
 
     return CreateUserResponse(
         message="User created successfully. Activation email has been sent.",
@@ -318,6 +341,7 @@ def update_user(
 
     db.commit()
     db.refresh(target_user)
+    publish_user_change(db, "user.updated", target_user.id)
 
     return UpdateUserResponse(
         message="User updated successfully.",
