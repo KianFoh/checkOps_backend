@@ -3,3 +3,4 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Create ini
 .\venv\Scripts\python.exe scripts\create_initial_admin.py
+./venv/bin/python scripts/create_initial_admin.py
