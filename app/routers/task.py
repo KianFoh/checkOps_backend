@@ -133,6 +133,22 @@ def get_user(user_id: int, db: DBSession) -> User:
     return user
 
 
+def validate_task_assignee(user: User, current_user: User) -> None:
+    if current_user.role == UserRole.Admin:
+        return
+
+    if current_user.role == UserRole.QC and (
+        user.id == current_user.id
+        or (user.role == UserRole.Operator and user.qc_id == current_user.id)
+    ):
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You can only assign tasks to yourself or operators assigned to you.",
+    )
+
+
 def validate_task_recurrence(
     recurrence_type: RecurrenceType,
     recurrence_interval: int,
@@ -533,10 +549,11 @@ def get_task(
 @router.post("", response_model=TaskResponse)
 def create_task(
     payload: CreateTaskRequest,
-    current_user: User = Depends(require_roles(UserRole.Admin)),
+    current_user: User = Depends(require_roles(UserRole.Admin, UserRole.QC)),
     db: DBSession = Depends(get_db),
 ):
-    get_user(payload.user_id, db)
+    assigned_user = get_user(payload.user_id, db)
+    validate_task_assignee(assigned_user, current_user)
     recurrence_type = parse_recurrence_type(payload.recurrence_type)
     recurrence_unit = parse_interval_unit(payload.recurrence_unit)
     due_interval_unit = parse_interval_unit(payload.due_interval_unit)
