@@ -91,6 +91,8 @@ def to_task_entry_summary(entry: TaskEntry) -> TaskEntrySummary:
 
 
 def parse_task_status(value: str) -> TaskStatus:
+    if value == "Completed":
+        return TaskStatus.Completed
     try:
         return TaskStatus(value)
     except ValueError:
@@ -376,7 +378,7 @@ def validate_task_entry_update(
         if next_status not in (TaskStatus.Completed, TaskStatus.Failed):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Pending task entries can only be submitted as Completed or Failed.",
+                detail="Pending task entries can only be submitted as Submitted or Failed.",
             )
 
         if entry.user_id != current_user.id:
@@ -403,7 +405,7 @@ def validate_task_entry_update(
         if next_status not in (TaskStatus.Approved, TaskStatus.Rejected):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Completed task entries can only be reviewed as Approved or Rejected.",
+                detail="Submitted task entries can only be reviewed as Approved or Rejected.",
             )
 
         if not can_review_entry(entry, current_user):

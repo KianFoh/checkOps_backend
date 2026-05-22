@@ -8,7 +8,7 @@ from app.database import Base
 
 class TaskStatus(enum.Enum):
     Pending = "Pending"
-    Completed = "Completed"
+    Completed = "Submitted"
     Failed = "Failed"
     Approved = "Approved"
     Rejected = "Rejected"

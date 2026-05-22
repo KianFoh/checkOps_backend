@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 TaskStatusValue = Literal[
     "Pending",
-    "Completed",
+    "Submitted",
     "Failed",
     "Approved",
     "Rejected",
