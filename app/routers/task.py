@@ -20,15 +20,18 @@ from app.models.task import RecurrenceType
 from app.models.task import Task
 from app.models.task import TaskEntry
 from app.models.task import TaskStatus
+from app.models.notification import Notification
 from app.models.user import User
 from app.models.user import UserRole
 from app.schemas.task import CreateTaskEntryRequest
 from app.schemas.task import CreateTaskRequest
 from app.schemas.task import GenerateTaskEntriesRequest
 from app.schemas.task import GenerateTaskEntriesResponse
+from app.schemas.task import ListTaskEntryLiteResponse
 from app.schemas.task import ListTaskEntriesResponse
 from app.schemas.task import ListTasksResponse
 from app.schemas.task import MessageResponse
+from app.schemas.task import TaskEntryLiteSummary
 from app.schemas.task import TaskEntryResponse
 from app.schemas.task import TaskEntrySummary
 from app.schemas.task import TaskResponse
@@ -87,6 +90,17 @@ def to_task_entry_summary(entry: TaskEntry) -> TaskEntrySummary:
         reviewed_by_user_id=entry.reviewed_by_user_id,
         submitted_at=entry.submitted_at,
         reviewed_at=entry.reviewed_at,
+    )
+
+
+def to_task_entry_lite_summary(entry) -> TaskEntryLiteSummary:
+    return TaskEntryLiteSummary(
+        id=entry.id,
+        task_id=entry.task_id,
+        user_id=entry.user_id,
+        start_at=entry.start_at,
+        due_at=entry.due_at,
+        status=entry.status.value,
     )
 
 
@@ -436,21 +450,117 @@ def validate_task_entry_update(
     return next_status
 
 
-def next_start_at(task: Task, last_start_at: datetime | None) -> datetime | None:
+def next_recurrence_after(task: Task, start_at: datetime) -> datetime | None:
     if task.recurrence_type == RecurrenceType.Once:
-        return task.recurrence_start_at if last_start_at is None else None
+        return None
 
     if task.recurrence_unit is None:
         return None
 
-    if last_start_at is None:
-        return task.recurrence_start_at
-
     return add_interval(
-        last_start_at,
+        start_at,
         task.recurrence_interval,
         task.recurrence_unit,
     )
+
+
+def latest_task_entry(task_id: int, db: DBSession) -> TaskEntry | None:
+    return (
+        db.query(TaskEntry)
+        .filter(TaskEntry.task_id == task_id)
+        .order_by(TaskEntry.start_at.desc(), TaskEntry.id.desc())
+        .first()
+    )
+
+
+def sync_next_recurrence_start_after_config_change(
+    task: Task,
+    db: DBSession,
+    recurrence_start_changed: bool,
+) -> None:
+    if recurrence_start_changed:
+        return
+
+    last_entry = latest_task_entry(task.id, db)
+    if last_entry is None:
+        return
+
+    next_at = next_recurrence_after(task, last_entry.start_at)
+    if next_at is not None:
+        task.recurrence_start_at = next_at
+
+
+def advance_recurrence_start_to_future(
+    task: Task,
+    now: datetime | None = None,
+) -> None:
+    current_time = now or datetime.now()
+    next_at: datetime | None = task.recurrence_start_at
+
+    while next_at is not None and next_at <= current_time:
+        next_at = next_recurrence_after(task, next_at)
+
+    if next_at is not None:
+        task.recurrence_start_at = next_at
+
+
+def generate_due_task_entries(
+    db: DBSession,
+    now: datetime | None = None,
+    max_entries: int = 100,
+) -> list[TaskEntry]:
+    current_time = now or datetime.now()
+    generated_entries: list[TaskEntry] = []
+    recurrence_start_changed = False
+
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.is_active.is_(True),
+            Task.recurrence_start_at <= current_time,
+        )
+        .order_by(Task.recurrence_start_at.asc(), Task.id.asc())
+        .with_for_update(skip_locked=True)
+        .all()
+    )
+
+    for task in tasks:
+        if len(generated_entries) >= max_entries:
+            break
+
+        existing_starts = {
+            row[0]
+            for row in db.query(TaskEntry.start_at)
+            .filter(TaskEntry.task_id == task.id)
+            .all()
+        }
+
+        next_at: datetime | None = task.recurrence_start_at
+        while (
+            next_at is not None
+            and next_at <= current_time
+            and len(generated_entries) < max_entries
+        ):
+            if next_at not in existing_starts:
+                entry = make_entry(task, start_at=next_at)
+                db.add(entry)
+                db.flush()
+                notify_task_entry_assigned(db, entry)
+                generated_entries.append(entry)
+                existing_starts.add(next_at)
+
+            next_at = next_recurrence_after(task, next_at)
+
+        if next_at is not None:
+            task.recurrence_start_at = next_at
+            recurrence_start_changed = True
+
+    if generated_entries or recurrence_start_changed:
+        db.commit()
+        for entry in generated_entries:
+            db.refresh(entry)
+
+    return generated_entries
 
 
 def can_access_user(user: User, current_user: User) -> bool:
@@ -464,7 +574,11 @@ def can_access_user(user: User, current_user: User) -> bool:
 
 
 def can_access_task(task: Task, current_user: User) -> bool:
-    return task.user is not None and can_access_user(task.user, current_user)
+    if task.user is not None and can_access_user(task.user, current_user):
+        return True
+    if current_user.role == UserRole.Operator:
+        return any(entry.user_id == current_user.id for entry in task.entries)
+    return False
 
 
 def can_access_entry(entry: TaskEntry, current_user: User) -> bool:
@@ -474,7 +588,7 @@ def can_access_entry(entry: TaskEntry, current_user: User) -> bool:
         return True
     if current_user.role == UserRole.QC:
         return entry.user is not None and entry.user.qc_id == current_user.id
-    return can_access_task(entry.task, current_user)
+    return False
 
 
 @router.get("", response_model=ListTasksResponse)
@@ -492,7 +606,10 @@ def get_tasks(
         if current_user.role == UserRole.QC:
             query = query.filter((Task.user_id == current_user.id) | (User.qc_id == current_user.id))
         else:
-            query = query.filter(Task.user_id == current_user.id)
+            query = query.filter(
+                (Task.user_id == current_user.id)
+                | Task.entries.any(TaskEntry.user_id == current_user.id)
+            )
 
     if search is not None:
         cleaned_search = search.strip()
@@ -580,12 +697,6 @@ def create_task(
         is_active=payload.is_active,
     )
     db.add(task)
-    db.flush()
-
-    entry = make_entry(task, start_at=task.recurrence_start_at)
-    db.add(entry)
-    db.flush()
-    notify_task_entry_assigned(db, entry)
     db.commit()
     db.refresh(task)
 
@@ -599,7 +710,7 @@ def create_task(
 def update_task(
     task_id: int,
     payload: UpdateTaskRequest,
-    current_user: User = Depends(require_roles(UserRole.Admin)),
+    current_user: User = Depends(require_roles(UserRole.Admin, UserRole.QC)),
     db: DBSession = Depends(get_db),
 ):
     task = db.query(Task).filter(Task.id == task_id).first()
@@ -609,6 +720,15 @@ def update_task(
             detail="Task not found.",
         )
 
+    if current_user.role == UserRole.QC and not can_access_task(
+        task,
+        current_user,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only edit tasks assigned to yourself or operators assigned to you.",
+        )
+
     update_data = payload.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(
@@ -616,11 +736,20 @@ def update_task(
             detail="No fields provided for update.",
         )
 
+    was_inactive = not task.is_active
+
     if "user_id" in update_data:
-        get_user(update_data["user_id"], db)
+        assigned_user = get_user(update_data["user_id"], db)
+        validate_task_assignee(assigned_user, current_user)
         task.user_id = update_data["user_id"]
 
-    for field in ("name", "description", "location", "recurrence_start_at", "is_active"):
+    for field in (
+        "name",
+        "description",
+        "location",
+        "recurrence_start_at",
+        "is_active",
+    ):
         if field in update_data:
             setattr(task, field, update_data[field])
 
@@ -645,6 +774,20 @@ def update_task(
         task.recurrence_unit,
     )
     validate_due_interval(task.due_interval)
+    recurrence_config_fields = {
+        "recurrence_type",
+        "recurrence_interval",
+        "recurrence_unit",
+    }
+    if recurrence_config_fields & update_data.keys():
+        sync_next_recurrence_start_after_config_change(
+            task,
+            db,
+            recurrence_start_changed="recurrence_start_at" in update_data,
+        )
+
+    if was_inactive and task.is_active:
+        advance_recurrence_start_to_future(task)
 
     db.commit()
     db.refresh(task)
@@ -668,6 +811,25 @@ def delete_task(
             detail="Task not found.",
         )
 
+    task_entry_ids = [
+        row[0]
+        for row in db.query(TaskEntry.id)
+        .filter(TaskEntry.task_id == task.id)
+        .all()
+    ]
+
+    notification_filter = Notification.related_task_id == task.id
+    if task_entry_ids:
+        notification_filter = notification_filter | Notification.related_task_entry_id.in_(
+            task_entry_ids,
+        )
+
+    db.query(Notification).filter(notification_filter).delete(
+        synchronize_session=False,
+    )
+    db.query(TaskEntry).filter(TaskEntry.task_id == task.id).delete(
+        synchronize_session=False,
+    )
     db.delete(task)
     db.commit()
 
@@ -728,11 +890,14 @@ def get_task_entries(
     )
 
 
-@router.post("/{task_id}/entries", response_model=TaskEntryResponse)
-def create_task_entry(
+@router.get("/{task_id}/entries/lite", response_model=ListTaskEntryLiteResponse)
+def get_task_entry_lite_list(
     task_id: int,
-    payload: CreateTaskEntryRequest,
-    current_user: User = Depends(require_roles(UserRole.Admin)),
+    status_filter: str | None = Query(default=None, alias="status"),
+    user_id: int | None = Query(default=None),
+    due_from: datetime | None = Query(default=None),
+    due_to: datetime | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     task = db.query(Task).filter(Task.id == task_id).first()
@@ -742,8 +907,73 @@ def create_task_entry(
             detail="Task not found.",
         )
 
+    if not can_access_task(task, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this task.",
+        )
+
+    expire_overdue_entries(db)
+    query = db.query(
+        TaskEntry.id,
+        TaskEntry.task_id,
+        TaskEntry.user_id,
+        TaskEntry.start_at,
+        TaskEntry.due_at,
+        TaskEntry.status,
+    ).filter(TaskEntry.task_id == task_id)
+
+    if current_user.role != UserRole.Admin:
+        if current_user.role == UserRole.QC:
+            query = query.join(User, TaskEntry.user_id == User.id).filter(
+                (TaskEntry.user_id == current_user.id) | (User.qc_id == current_user.id)
+            )
+        else:
+            query = query.filter(TaskEntry.user_id == current_user.id)
+
+    if status_filter is not None:
+        query = query.filter(TaskEntry.status == parse_task_status(status_filter))
+
+    if user_id is not None:
+        query = query.filter(TaskEntry.user_id == user_id)
+
+    if due_from is not None:
+        query = query.filter(TaskEntry.due_at >= due_from)
+
+    if due_to is not None:
+        query = query.filter(TaskEntry.due_at <= due_to)
+
+    entries = query.order_by(TaskEntry.start_at.asc(), TaskEntry.id.asc()).all()
+
+    return ListTaskEntryLiteResponse(
+        message="Task entry summaries retrieved successfully.",
+        entries=[to_task_entry_lite_summary(entry) for entry in entries],
+    )
+
+
+@router.post("/{task_id}/entries", response_model=TaskEntryResponse)
+def create_task_entry(
+    task_id: int,
+    payload: CreateTaskEntryRequest,
+    current_user: User = Depends(require_roles(UserRole.Admin, UserRole.QC)),
+    db: DBSession = Depends(get_db),
+):
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found.",
+        )
+
+    if current_user.role == UserRole.QC and not can_access_task(task, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this task.",
+        )
+
     user_id = payload.user_id or task.user_id
-    get_user(user_id, db)
+    assigned_user = get_user(user_id, db)
+    validate_task_assignee(assigned_user, current_user)
     due_at = payload.due_at or calculate_due_at(task, payload.start_at)
     validate_entry_times(payload.start_at, due_at)
 
@@ -787,14 +1017,7 @@ def generate_task_entries(
             detail="Inactive tasks cannot generate entries.",
         )
 
-    last_entry = (
-        db.query(TaskEntry)
-        .filter(TaskEntry.task_id == task_id)
-        .order_by(TaskEntry.start_at.desc(), TaskEntry.id.desc())
-        .first()
-    )
-    next_at = next_start_at(task, last_entry.start_at if last_entry else None)
-
+    next_at = task.recurrence_start_at
     entries: list[TaskEntry] = []
     existing_starts = {
         row[0]
@@ -811,7 +1034,10 @@ def generate_task_entries(
             notify_task_entry_assigned(db, entry)
             entries.append(entry)
             existing_starts.add(next_at)
-        next_at = next_start_at(task, next_at)
+        next_at = next_recurrence_after(task, next_at)
+
+    if next_at is not None:
+        task.recurrence_start_at = next_at
 
     db.commit()
     expire_overdue_entries(db)
@@ -885,7 +1111,8 @@ def update_task_entry(
     schedule_changed = bool({"start_at", "due_at"} & update_data.keys())
 
     if "user_id" in update_data:
-        get_user(update_data["user_id"], db)
+        assigned_user = get_user(update_data["user_id"], db)
+        validate_task_assignee(assigned_user, current_user)
         entry.user_id = update_data["user_id"]
 
     for field in (

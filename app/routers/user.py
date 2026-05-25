@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_
 from sqlalchemy.orm import Session as DBSession
 
 from app.database import SessionLocal
@@ -92,18 +91,10 @@ def get_users(
     role: str | None = Query(default=None),
     roles: list[str] | None = Query(default=None),
     active: bool | None = Query(default=None),
-    current_user: User = Depends(require_roles(UserRole.Admin, UserRole.QC)),
+    _current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     query = db.query(User)
-
-    if current_user.role == UserRole.QC:
-        query = query.filter(
-            or_(
-                User.id == current_user.id,
-                (User.role == UserRole.Operator) & (User.qc_id == current_user.id),
-            )
-        )
 
     if search is not None:
         cleaned_search = search.strip()
@@ -151,7 +142,7 @@ def get_users(
 @router.get("/{user_id}", response_model=GetUserResponse)
 def get_user(
     user_id: int,
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db),
 ):
     target_user = db.query(User).filter(User.id == user_id).first()
@@ -159,19 +150,6 @@ def get_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found.",
-        )
-
-    is_admin = current_user.role == UserRole.Admin
-    is_self = current_user.id == target_user.id
-    is_assigned_operator = (
-        current_user.role == UserRole.QC
-        and target_user.role == UserRole.Operator
-        and target_user.qc_id == current_user.id
-    )
-    if not is_admin and not is_self and not is_assigned_operator:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only access your own profile or operators assigned to you.",
         )
 
     return GetUserResponse(

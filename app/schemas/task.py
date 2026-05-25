@@ -32,6 +32,15 @@ class TaskEntrySummary(BaseModel):
     reviewed_at: datetime | None = None
 
 
+class TaskEntryLiteSummary(BaseModel):
+    id: int
+    task_id: int
+    user_id: int
+    start_at: datetime
+    due_at: datetime
+    status: TaskStatusValue
+
+
 class TaskSummary(BaseModel):
     id: int
     name: str
@@ -113,6 +122,11 @@ class TaskEntryResponse(BaseModel):
 class ListTaskEntriesResponse(BaseModel):
     message: str
     entries: list[TaskEntrySummary]
+
+
+class ListTaskEntryLiteResponse(BaseModel):
+    message: str
+    entries: list[TaskEntryLiteSummary]
 
 
 class GenerateTaskEntriesResponse(BaseModel):
